@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "driver/gpio.h"
-#include "led_strip.h"
+// #include "led_strip.h"
 #include "esp_log.h"
 #include "math.h"
 #include "esp_wifi.h"
@@ -24,6 +24,7 @@ static int queue_next_idx = 0;
 static int next_number = 1;
 static volatile bool boot_button_pressed_flag = false;
 
+/* 
 static led_strip_handle_t led_strip;
 
 void hsv_to_rgb(uint16_t h, uint8_t s, uint8_t v, uint8_t *r, uint8_t *g, uint8_t *b) {
@@ -42,6 +43,7 @@ void hsv_to_rgb(uint16_t h, uint8_t s, uint8_t v, uint8_t *r, uint8_t *g, uint8_
         default: *r = v; *g = p; *b = q; break;
     }
 }
+*/
 
 void wifi_init_softap(void) {
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
@@ -297,6 +299,7 @@ void app_main(void) {
     xTaskCreate(captive_portal_dns_task, "dns_task", 4096, NULL, 5, NULL);
     xTaskCreate(button_poll_task, "button_task", 2048, NULL, 10, NULL);
 
+    /*
     led_strip_config_t strip_config = { .strip_gpio_num = LED_GPIO_PIN, .max_leds = 1 };
     led_strip_rmt_config_t rmt_config = { .resolution_hz = 10 * 1000 * 1000 };
     ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &led_strip));
@@ -315,4 +318,5 @@ void app_main(void) {
         led_strip_refresh(led_strip);
         vTaskDelay(50 / portTICK_PERIOD_MS);
     }
+    */
 }
