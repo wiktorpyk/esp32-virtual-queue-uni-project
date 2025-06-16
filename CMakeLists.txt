@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(muselab-nanoesp32-c6-led-demo)
+project(esp32-virtual-queue)
 
 set(EXTRA_COMPONENT_DIRS
     $ENV{IDF_PATH}/examples/common_components/protocol_examples_common
