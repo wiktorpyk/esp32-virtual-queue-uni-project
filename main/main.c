@@ -12,6 +12,7 @@
 #include "esp_http_server.h"
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
+#include "esp_timer.h"
 
 #define LED_GPIO_PIN  8
 #define TAG "BLINK"
@@ -23,6 +24,9 @@ static int queue_count = 0;
 static int queue_next_idx = 0;
 static int next_number = 1;
 static volatile bool boot_button_pressed_flag = false;
+static volatile int person_being_called = 0;
+static volatile int64_t call_timestamp = 0;
+#define CALL_TIMEOUT_US (10 * 1000 * 1000) // 10 seconds
 
 /* 
 static led_strip_handle_t led_strip;
@@ -88,7 +92,7 @@ static const char *QUEUE_PAGE_HTML_PREFIX =
 "</script></head><body><h1>You are on the Queue Page</h1><p>Your number: <b>";
 
 static const char *QUEUE_PAGE_HTML_SUFFIX =
-"</b></p><p>Waiting for your turn...</p></body></html>";
+"</b></p><p>Waiting for your turn...</p><form action='/leave_queue' method='get'><button type='submit'>Leave Queue</button></form></body></html>";
 
 static const char *PROCEED_PAGE_HTML =
 "<!DOCTYPE html><html><head><title>Proceed</title><script>"
@@ -133,6 +137,17 @@ static int get_queue_index(int number) {
     return -1;
 }
 
+static void remove_from_queue_by_index(int idx) {
+    if (idx < 0 || idx >= queue_count) return;
+    for (int i = idx; i < queue_count - 1; i++) {
+        queue_numbers[i] = queue_numbers[i + 1];
+    }
+    queue_count--;
+    if (idx < queue_next_idx) {
+        queue_next_idx--;
+    }
+}
+
 static int get_number_from_cookie(httpd_req_t *req) {
     char cookie[128] = {0};
     size_t cookie_len = httpd_req_get_hdr_value_len(req, "Cookie");
@@ -165,26 +180,58 @@ esp_err_t join_queue_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+esp_err_t leave_queue_handler(httpd_req_t *req) {
+    int client_number = get_number_from_cookie(req);
+    if (client_number > 0) {
+        if (client_number == person_being_called) {
+            person_being_called = 0;
+        }
+        int idx = get_queue_index(client_number);
+        if (idx != -1) {
+            remove_from_queue_by_index(idx);
+        }
+        httpd_resp_set_hdr(req, "Set-Cookie", "queue_number=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT");
+    }
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "/");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
 esp_err_t poll_handler(httpd_req_t *req) {
     int client_number = get_number_from_cookie(req);
     httpd_resp_set_type(req, "text/plain");
+
+    if (person_being_called != 0 && (esp_timer_get_time() - call_timestamp > CALL_TIMEOUT_US)) {
+        int timed_out_person_idx = get_queue_index(person_being_called);
+        if (timed_out_person_idx != -1 && timed_out_person_idx == queue_next_idx) {
+            if (queue_count > queue_next_idx + 1) {
+                int temp = queue_numbers[queue_next_idx];
+                queue_numbers[queue_next_idx] = queue_numbers[queue_next_idx + 1];
+                queue_numbers[queue_next_idx + 1] = temp;
+            }
+        }
+        person_being_called = 0;
+    }
+
+    if (boot_button_pressed_flag && person_being_called == 0 && queue_next_idx < queue_count) {
+        person_being_called = queue_numbers[queue_next_idx];
+        call_timestamp = esp_timer_get_time();
+        boot_button_pressed_flag = false;
+    }
+
     if (client_number == 0) {
         httpd_resp_send(req, "", HTTPD_RESP_USE_STRLEN);
         return ESP_OK;
     }
-    int idx = get_queue_index(client_number);
-    if (idx == -1) {
+
+    if (get_queue_index(client_number) == -1) {
         httpd_resp_send(req, "", HTTPD_RESP_USE_STRLEN);
         return ESP_OK;
     }
-    if (boot_button_pressed_flag && queue_next_idx < queue_count) {
-        if (queue_numbers[queue_next_idx] == client_number) {
-            httpd_resp_send(req, "PROCEED", HTTPD_RESP_USE_STRLEN);
-            queue_next_idx++;
-            boot_button_pressed_flag = false;
-        } else {
-            httpd_resp_send(req, "IN_QUEUE", HTTPD_RESP_USE_STRLEN);
-        }
+
+    if (client_number == person_being_called) {
+        httpd_resp_send(req, "PROCEED", HTTPD_RESP_USE_STRLEN);
     } else {
         httpd_resp_send(req, "IN_QUEUE", HTTPD_RESP_USE_STRLEN);
     }
@@ -205,8 +252,17 @@ esp_err_t queue_handler(httpd_req_t *req) {
 }
 
 esp_err_t proceed_handler(httpd_req_t *req) {
-    httpd_resp_set_type(req, "text/html");
-    httpd_resp_send(req, PROCEED_PAGE_HTML, HTTPD_RESP_USE_STRLEN);
+    int client_number = get_number_from_cookie(req);
+    if (client_number > 0 && client_number == person_being_called) {
+        person_being_called = 0;
+        queue_next_idx++;
+        httpd_resp_set_type(req, "text/html");
+        httpd_resp_send(req, PROCEED_PAGE_HTML, HTTPD_RESP_USE_STRLEN);
+    } else {
+        httpd_resp_set_status(req, "302 Found");
+        httpd_resp_set_hdr(req, "Location", "/queue");
+        httpd_resp_send(req, NULL, 0);
+    }
     return ESP_OK;
 }
 
@@ -220,6 +276,9 @@ void start_captive_portal_httpd(void) {
 
         httpd_uri_t uri_join_queue = { .uri = "/join_queue", .method = HTTP_GET, .handler = join_queue_handler, .user_ctx = NULL };
         httpd_register_uri_handler(server, &uri_join_queue);
+
+        httpd_uri_t uri_leave_queue = { .uri = "/leave_queue", .method = HTTP_GET, .handler = leave_queue_handler, .user_ctx = NULL };
+        httpd_register_uri_handler(server, &uri_leave_queue);
 
         httpd_uri_t uri_poll = { .uri = "/poll", .method = HTTP_GET, .handler = poll_handler, .user_ctx = NULL };
         httpd_register_uri_handler(server, &uri_poll);
@@ -256,7 +315,7 @@ void captive_portal_dns_task(void *pvParameters) {
             buf[3] |= 0x80;
             buf[7] = 1;
             int qlen = len;
-            uint8_t answer[16] = {0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04, 192,168,4,1};
+            uint8_t answer[16] = {0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04, 192, 168, 4, 1};
             memcpy(buf + qlen, answer, 16);
             sendto(sock, buf, qlen + 16, 0, (struct sockaddr *)&client_addr, addr_len);
         }
